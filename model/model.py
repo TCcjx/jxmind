@@ -172,6 +172,13 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
             (-x[..., x.shape[-1] // 2 :], x[..., : x.shape[-1] // 2]), dim=-1
         )
 
+    # cos/sin 可以是完整位置表；传入 position_ids 时先按需索引。
+    if position_ids is not None:
+        cos, sin = cos[position_ids], sin[position_ids]
+    # 允许直接传 [seq_len, head_dim] 的切片：补出 batch 维，避免与 head 维静默广播成高维张量。
+    elif cos.dim() == 2:
+        cos, sin = cos.unsqueeze(0), sin.unsqueeze(0)
+
     q_embed = (q * cos.unsqueeze(unsqueeze_dim)) + (
         rotate_half(q) * sin.unsqueeze(unsqueeze_dim)
     )
