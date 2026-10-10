@@ -1,201 +1,120 @@
-<div align="center">
-
 # jxmind · MokioMind
 
-![jxmind overview](docs/images/overview.png)
+一个可在本地完成 **预训练、指令微调（SFT）、检查点恢复和对话推理** 的小型 Decoder-only Transformer 项目。模型包含 RMSNorm、RoPE / YaRN、GQA、SwiGLU 和可选 MoE。
 
-**A small decoder-only Transformer language model, built up from the positional-encoding kernels.**
-**Current stage: normalization + RoPE/YaRN core. Not yet a runnable model.**
+项目名称和安装包统一为 `jxmind`；保留 `MokioMindConfig`、`MokioMindForCausalLM` 和 `model_type=mokiomind`，以兼容已有配置。代码面向学习与实验。示例数据和少量训练步数用于验证流程，生成质量需要充分训练才能评估。
 
-</div>
+## 安装
 
----
+需要 Python 3.13 或更高版本，以及 [uv](https://docs.astral.sh/uv/getting-started/installation/)。在项目根目录执行：
 
-## Status / 当前状态
-
-> [!WARNING]
-> **This repository cannot train or run inference yet.** There is no `Attention`, `FeedForward`,
-> `TransformerBlock` or `LMHead` class, no tokenizer and no dataset loader. What exists is the
-> numerical core (RMSNorm, RoPE with YaRN scaling) plus a config that describes a model which is
-> not yet assembled. Every claim below is backed by a file, a line number, or a test that runs on
-> this machine.
->
-> 本仓库目前**不能训练、也不能推理**：没有 Attention / 前馈 / TransformerBlock / LM Head，也没有分词器与数据加载。
-> 已落地的是数值内核（RMSNorm、带 YaRN 缩放的 RoPE）和一份描述"尚未拼装起来的模型"的配置。下文每条声明都能对应到文件、行号或一次真实运行。
-
----
-
-## What is implemented / 已实现的部分
-
-All of it lives in [`model/model.py`](model/model.py) — 188 lines, 134 of them code.
-全部实现都在 [`model/model.py`](model/model.py) 里，共 188 行，其中代码行 134。
-
-| Symbol | Location | What it does | Verified by |
-| --- | --- | --- | --- |
-| `MokioMindConfig` | [model.py:7](model/model.py#L7) | `PretrainedConfig` subclass, 23 explicit hyper-parameters, JSON round-trippable | `config_roundtrips_through_json` |
-| `RMSNorm` | [model.py:80](model/model.py#L80) | Pre-norm with learnable per-dimension gain, fp16 in → fp16 out | 4 checks |
-| `precompute_freqs` | [model.py:95](model/model.py#L95) | RoPE cos/sin table, with optional **YaRN** long-context scaling | `rope_cos_sin_are_unit_magnitude`, `rope_half_split_layout`, `yarn_*` (5) |
-| `apply_rotary_pos_emb` | [model.py:169](model/model.py#L169) | Half-split rotation of Q/K, accepts a `[B,S,D]` table or `position_ids` | `rope_position_zero_is_identity`, `rope_shift_invariance_of_scores`, `rope_position_ids_matches_slicing`, `rope_output_shape_matches_query` |
-
-> 上表四行即为本仓库的全部有效实现。校验列对应 [`tests/test_components.py`](tests/test_components.py)，
-> 共 18 项断言，全部通过。
-
-### Measured behaviour / 实测数值
-
-| Property | Measured | Command |
-| --- | --- | --- |
-| RMS of `RMSNorm(x)` where `x ~ N(0, 50²)` | `1.0000` | `uv run python tests/test_components.py` |
-| Max abs error of the QK score matrix after shifting every position by +5 | `7.63e-06` | same |
-| YaRN frequency ratio for dims `i ≤ 5` (high freq) | `1.0` — untouched | same |
-| YaRN frequency ratio for dims `i ≥ 14` (low freq) | `0.0625 = 1/16` | same |
-| Default geometry | `head_dim = 512 / 8 = 64`, `8 Q heads / 2 KV heads` | `config_default_geometry` |
-
----
-
-## Module coverage / 模块覆盖度
-
-![module coverage](docs/images/module_coverage.png)
-
-Three tracked files are **empty** and are kept deliberately as planned landing spots, per the
-current roadmap: `main.py`, `dataset/lm_dataset.py`, `trainer/trainer_utils.py`.
-`trainer/train_pretrain.py` contains a **verbatim copy** of `MokioMindConfig` rather than an import
-from `model.model`, and holds no training loop. `pra.py` is a `torch.where` scratch file.
-
-> 按当前规划，`main.py`、`dataset/lm_dataset.py`、`trainer/trainer_utils.py` 三个空文件作为后续落点保留。
-> `trainer/train_pretrain.py` 目前是 `MokioMindConfig` 的**逐行副本**而非 `from model.model import ...`，且不含任何训练循环；
-> `pra.py` 是 `torch.where` 练习草稿。这些都被列入下方"已知问题"。
-
----
-
-## Target architecture and where the line sits / 目标架构与实现边界
-
-![target architecture](docs/images/target_architecture.png)
-
-> 绿色 = 已实现并通过校验；橙色虚线 = 配置里已描述、代码待补；灰色虚线 = 尚未开始。
-> 图中链路是 `MokioMindConfig` 默认超参所**指向**的形态，不是当前可执行的计算图。
-
----
-
-## RoPE + YaRN, in detail / 位置编码细节
-
-`precompute_freqs` builds the standard RoPE frequencies `1 / (base^(2i/d))` and, when a `rope_scaling`
-dict is supplied and `end / original_max > 1`, applies **YaRN**:
-
-```
-inv_dim(b) = d · ln(orig_max / (b · 2π)) / (2 · ln(base))
-low, high  = floor(inv_dim(beta_fast)), ceil(inv_dim(beta_slow))
-ramp(i)    = clamp((i − low) / (high − low), 0, 1)
-freq'(i)   = freq(i) · ((1 − ramp) + ramp / factor)
+```sh
+uv sync --frozen
+uv run pytest -q
 ```
 
-With the config defaults (`d = 64`, `base = 1e6`, `orig_max = 2048`, `beta_fast = 32`,
-`beta_slow = 1`, `factor = 16`) this yields `low = 5`, `high = 14` — measured, not assumed.
+锁文件固定依赖版本；运行依赖仅为 PyTorch 和 Transformers，开发组额外安装 pytest 和 Ruff。CPU 可以运行全部测试和小模型演示。训练默认自动选择 CUDA、MPS 或 CPU，使用 `--device cpu` 可显式选择 CPU。GPU 训练请按 [PyTorch 安装说明](https://pytorch.org/get-started/locally/)配置适合本机的 CUDA 版本。
 
-![YaRN measured frequency curve](docs/images/rope_yarn.png)
+## 快速跑通：预训练 → SFT → 推理
 
-> 上图不是示意图，是把 `precompute_freqs` 的真实输出在 `t = 1` 处用 `atan2(sin, cos)` 逐维反演角度、
-> 再与未缩放版本相除得到的实测曲线。`i ≤ 5` 比率严格为 1，`i ≥ 14` 严格为 `1/16`，中间 9 个维度线性过渡。
-> 之所以用 `atan2` 而不是 `arccos`：高频维的角度接近 0，`arccos` 在该区间会损失全部浮点精度。
+以下命令适用于 PowerShell、bash，均在仓库根目录运行。离线演示分词器使用 259 个 byte / special token，创建一次即可；再次创建时会拒绝覆盖已有文件。
 
-Two properties worth calling out, both asserted in the test suite:
+```sh
+# 1. 创建演示分词器；无需下载 tokenizer 或语料
+uv run python scripts/create_demo_assets.py
 
-- **Relative-position invariance.** Rotating all positions by a constant leaves the QK score matrix
-  unchanged to within `7.6e-06`.
-- **`attention_factor` is a uniform amplitude scale.** With `attention_factor = 2.0` every `cos`/`sin`
-  entry doubles exactly; it compensates the flatter attention distribution at longer distances.
+# 2. 训练一个约 3.5 万参数的小模型，最多执行 4 次参数更新
+uv run python trainer/train_pretrain.py --data-path examples/pretrain.jsonl --tokenizer-path assets/demo --run-name pretrain_demo --hidden-size 32 --intermediate-size 64 --num-hidden-layers 2 --num-attention-heads 4 --num-key-value-heads 2 --max-position-embeddings 512 --seq-length 64 --batch-size 2 --accumulation-steps 2 --epochs 2 --max-steps 4 --warmup-steps 0 --log-interval 1 --val-size 1 --device cpu
 
-> 两点均由测试断言：整体平移位置不改变 QK 分数矩阵（相对位置编码成立）；`attention_factor` 是对 cos/sin 的均匀放大，
-> 用于补偿长上下文下注意力分布变平。
+# 3. 使用预训练检查点微调；自动读取模型结构和分词器
+uv run python trainer/train_sft.py --data-path examples/sft.jsonl --checkpoint output/pretrain_demo/4 --run-name sft_demo_small --seq-length 512 --batch-size 2 --accumulation-steps 2 --epochs 3 --max-steps 4 --warmup-steps 0 --log-interval 1 --val-size 2 --device cpu
 
----
+# 4. 单轮推理；temperature=0 表示贪心生成
+uv run python main.py --checkpoint output/sft_demo_small/4 --prompt "你好" --max-new-tokens 32 --temperature 0 --device cpu
 
-## Quick start / 快速开始
-
-```bash
-# Python >= 3.13 required; this repo is developed on 3.14.6
-uv sync                                          # installs torch 2.9.0, transformers 4.57.1
-uv run python tests/test_components.py           # 18 numerical checks
-uv run python pra.py                             # unrelated torch.where scratch
+# 5. 省略 prompt，进入交互对话；输入 exit 退出
+uv run python main.py --checkpoint output/sft_demo_small/4 --max-new-tokens 32 --device cpu
 ```
 
-Expected tail of the test run:
+训练结束会打印 JSON 摘要和检查点路径，指标写入 `loss.jsonl`，至少两个训练日志点时生成 `loss_curve.svg`。不要以演示模型的回复判断项目最终能力；byte tokenizer 的少量训练可能生成不可读文本。
+
+`uv sync` 也安装以下等价入口：`uv run jxmind`、`uv run jxmind-pretrain`、`uv run jxmind-sft`、`uv run jxmind-download`、`uv run jxmind-demo`。完整参数可通过每个命令的 `--help` 查看。
+
+## 使用实际语料
+
+下载 MiniMind 分词器，默认保存到 `assets/`：
+
+```sh
+uv run python scripts/download_assets.py
+# 可选：下载大型 SFT CSV 语料，需预留数 GB 磁盘空间
+uv run python scripts/download_assets.py --with-data
+```
+
+网络不通时，可手动将兼容的 `tokenizer.json`、`tokenizer_config.json` 放入本地目录，再指定 `--tokenizer-path`。本地加载不会访问网络。分词器必须有 EOS token；SFT 和聊天还需要 `chat_template`。新模型默认从分词器确定词表大小。
+
+数据支持 UTF-8 JSONL / CSV。预训练读取 `text`、`content` 或 `q/a`；每条文本后插入 EOS，拼成定长 token 块，末尾不足一个块的 token 丢弃。SFT 支持 `q/a`、`question/response`、`prompt/chosen`、`instruction/input/output` 和 `messages`，仅对最后一条助手回复计算 loss。字段示例见 [数据说明](docs/data.md)。
+
+```sh
+uv run python trainer/train_pretrain.py --data-path data/pretrain.jsonl --tokenizer-path assets --run-name pretrain_full --seq-length 512 --batch-size 8 --accumulation-steps 2 --epochs 1
+uv run python trainer/train_sft.py --data-path data/sft_data_single.csv --checkpoint output/pretrain_full/500 --run-name sft_full --seq-length 512 --batch-size 8 --accumulation-steps 2 --epochs 1
+```
+
+第二条命令中的 `500` 是示例，替换为实际保存的检查点步数。数据编码后保存在内存中，大语料需要预留 RAM；可用 `--max-samples 10000` 限制读取条数。`--val-size` 是验证样本数上限，始终至少保留一个训练样本，`--val-size 0` 关闭验证。预训练按 token 块分割验证集，正式评估建议事先按文档划分独立语料，避免同一文档跨集合。
+
+默认模型配置：hidden size 512、8 层、8 个 Q 头、2 个 KV 头、FFN 1408、最大位置表 32768。位置表长度是实现容量，实际长文本能力取决于训练数据。`--use-moe` 启用路由专家和共享专家；默认 4 个路由专家、1 个共享专家、每个 token 选择 2 个路由专家。
+
+## 继续训练与检查点
+
+`--checkpoint` 只加载权重，用于开启新的训练阶段；从目录加载时使用目录中的模型配置。新训练应指定新的 `--run-name`，避免混合旧日志。原 run 已存在时程序会报错，要求选择新名称或使用 `--resume`。
+
+`--resume` 从同一个 run 的最新完整检查点恢复权重、优化器、随机状态、epoch、batch 和更新步数。例如，将上面的预训练扩展到 8 步：
+
+```sh
+uv run python trainer/train_pretrain.py --data-path examples/pretrain.jsonl --run-name pretrain_demo --resume --seq-length 64 --batch-size 2 --accumulation-steps 2 --epochs 3 --max-steps 8 --warmup-steps 0 --log-interval 1 --val-size 1 --device cpu
+```
+
+保持相同的数据、切分、tokenizer、batch size、累积步数和 seed。程序会校验数据和词表摘要。`--epochs` 和 `--max-steps` 是累计训练目标；`max-steps=0` 表示不设额外步数上限。修改目标长度会改变余下训练的余弦学习率曲线。
+
+检查点结构和旧版本兼容说明见 [训练与检查点](docs/training.md)。旧版本产生的 `output/sft_demo` 等文件保留在本机，但旧训练的掩码存在未来信息泄漏；建议用修复后的代码开启新 run 重新训练。
+
+## 推理与上下文
+
+新检查点内包含分词器，可以复制整个检查点目录到其他机器推理。模型严格校验参数名称和形状。上游 MiniMind 权重的结构及参数名称会随版本变化，不能直接视为本项目检查点。
+
+`--max-context` 限制输入历史长度，程序同时为 `--max-new-tokens` 预留位置空间。历史过长时删除最早的完整问答轮次，保留 system 提示和当前问题；当前问题仍过长时给出错误。`--system` 设置系统提示，`--top-k` / `--top-p` / `--temperature` 控制生成。`--from-scratch` 使用随机参数，仅适合检查接口。
+
+## 项目结构
 
 ```text
-PASS  yarn_is_noop_within_original_window
-PASS  yarn_leaves_high_freq_untouched
-PASS  yarn_ramp_is_monotonic
-
-18/18 passed
+main.py                       单轮与交互推理
+model/model.py                模型、位置编码、注意力、MoE、生成
+dataset/lm_dataset.py         数据读取、标签、padding、训练/验证切分
+trainer/train_pretrain.py      预训练入口
+trainer/train_sft.py           SFT 入口
+trainer/trainer_utils.py       优化器、训练循环、检查点、日志、曲线
+scripts/download_assets.py    外部资源下载
+scripts/create_demo_assets.py 离线演示分词器
+examples/                     小型示例语料
+tests/                        数值、数据、训练及回归测试
+docs/                         数据与训练说明
+.github/workflows/ci.yml       Linux / Windows 测试与构建
 ```
 
-> `uv sync` 会按 `uv.lock` 从清华镜像安装依赖。仓库没有训练或推理入口，`main.py` 是空文件，
-> 因此当前唯一可运行的东西就是这套校验脚本。
+`assets/`、`data/`、`output/`、虚拟环境和工具缓存均被 Git 忽略；示例语料、源码和文档正常纳入版本管理。已移除无关的 `pra.py` 练习文件和三张描述旧实现边界的图片。
 
----
+## 开发与验证
 
-## Verification matrix / 校验矩阵
+```sh
+uv run pytest -q
+uv run ruff check .
+uv run ruff format --check .
+uv build
+```
 
-`tests/test_components.py` is dependency-free beyond `torch` + `transformers` and runs with or without
-pytest.
+测试不依赖外部语料或预下载的 tokenizer。覆盖 RMSNorm / RoPE / YaRN、SFT 标签与 padding、Dense / MoE 前向反向、因果性、KV 缓存、批量 EOS、上下文边界、梯度累积、短批次以及断点恢复。CI 配置在 Linux 和 Windows 上执行同样检查。
 
-| Group | Checks | What would break if it failed |
-| --- | --- | --- |
-| `rms_norm_*` | 4 | Scale-invariance lost, fp16 upcast, dead gradient through the norm |
-| `rope_*` | 6 | Absolute instead of relative positions; silent shape explosion when a `[S, D]` table is passed |
-| `yarn_*` | 5 | High-frequency dims wrongly interpolated, or scaling silently applied inside the trained window |
-| `config_*` | 3 | Config not loadable by `transformers` from a checkpoint directory |
+本地验证使用 Python 3.14.6、PyTorch 2.9.0 CPU、Transformers 4.57.1；CUDA / MPS 尚未在本次修复中实机验证。当前训练采用 FP32 和单设备；暂不包含 DDP、混合精度、RLHF 或服务部署。
 
-> 每组失败意味着什么，见表格第三列。测试脚本不依赖 pytest，直接 `python` 运行即可。
+## 致谢与许可
 
----
-
-## Known issues / 已知问题
-
-- `trainer/train_pretrain.py` duplicates `MokioMindConfig` instead of importing it — two copies will drift.
-- `apply_rotary_pos_emb` previously accepted `position_ids` and ignored it; a `[S, D]` table also broadcast
-  against the head dimension into a 5-D tensor **without raising**. Both are now handled and pinned by
-  `rope_output_shape_matches_query`.
-- `intermediate_size` defaults to `None` with no fallback, and is typed `int` rather than `Optional[int]`.
-- `rope_theta` and `flash_attention` are stored on the config but read by nothing; `precompute_freqs`
-  takes its own `rope_base` argument.
-- Package name `mokiomind` (`pyproject.toml`) and class prefix `MokioMind` do not match the repo name `jxmind`.
-- No tokenizer, dataset, training loop, checkpoint format, or inference path.
-
-> 前三条已在本次改动中处理或修复，其余为待办。特别注意：形状静默广播那一条是真实存在过的 bug，
-> 现在由 `rope_output_shape_matches_query` 锁住。
-
----
-
-## Roadmap / 路线图
-
-- [x] `MokioMindConfig` + `RMSNorm` + RoPE/YaRN `precompute_freqs` + `apply_rotary_pos_emb`
-- [x] Numerical test suite (18 checks)
-- [ ] `Attention` with GQA (8 Q / 2 KV) and a causal mask
-- [ ] `SwiGLU` feed-forward; then the `use_moe` path (4 routed + 1 shared, top-2, aux loss)
-- [ ] `TransformerBlock` / `MokioMindForCausalLM` with `forward` and `generate`
-- [ ] `dataset/lm_dataset.py`: tokenizer, packing, train/val split
-- [ ] `trainer/train_pretrain.py`: real loop importing the shared config
-- [ ] `main.py`: train / infer entry point
-- [ ] Trained weights + generation samples
-
-> 前两项已完成并有测试覆盖；后续每一项完成时都应同步更新本页与上面的图片。
-
----
-
-## Acknowledgements / 致谢
-
-This is a **learning and reproduction project**. The architecture it targets follows
-[jingyaogong/minimind](https://github.com/jingyaogong/minimind); `MokioMindConfig` is a renamed variant
-of `MiniMindConfig`, and the YaRN `rope_scaling` values (`beta_fast=32`, `beta_slow=1`, `factor=16`,
-`original_max_position_embeddings=2048`, `attention_factor=1.0`) are taken from that upstream. The repo
-layout (`dataset/lm_dataset.py`, `trainer/trainer_utils.py`) mirrors it as well. Upstream is Apache-2.0 licensed.
-
-> 这是一个学习与复现项目：目标架构参考 MiniMind，配置字段与 YaRN 超参取自上游，目录结构亦沿用之。
-> 本仓库当前的实现、测试与文档为自主完成，但**不应被描述为从零原创**。
-
-## License
-
-[Apache-2.0](LICENSE) — the same license as the upstream this project follows, so the attribution and
-notice requirements carry over.
-
-> 采用与上游一致的 Apache-2.0，署名与声明要求随之继承。
+架构和位置编码参考 [jingyaogong/minimind](https://github.com/jingyaogong/minimind)，配置字段和 YaRN 超参沿用其设计。本仓库是学习与复现项目，采用 [Apache-2.0](LICENSE)。外部 tokenizer 和数据由下载脚本按需取得，不随仓库分发；使用外部语料前请核对来源和许可。

@@ -1,15 +1,46 @@
 [project]
-name = "mokiomind"
-version = "0.1.0"
-description = "Add your description here"
+name = "jxmind"
+version = "0.2.0"
+description = "A compact decoder-only language model with pretraining, SFT and local inference"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "numpy>=2.3.4",
-    "pandas>=2.3.3",
-    "torch>=2.9.0",
-    "transformers>=4.57.1",
+    "torch>=2.9.0,<3",
+    "transformers>=4.57.1,<5",
 ]
+
+[dependency-groups]
+dev = ["pytest>=8.4,<10", "ruff>=0.14,<1"]
+
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project.scripts]
+jxmind = "main:main"
+jxmind-pretrain = "trainer.train_pretrain:main"
+jxmind-sft = "trainer.train_sft:main"
+jxmind-download = "scripts.download_assets:main"
+jxmind-demo = "scripts.create_demo_assets:main"
+
+[tool.setuptools]
+py-modules = ["main"]
+
+[tool.setuptools.packages.find]
+include = ["model*", "dataset*", "trainer*", "scripts*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+python_functions = ["test_*", "rms_norm_*", "rope_*", "yarn_*", "config_*"]
+
+[tool.ruff]
+line-length = 110
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
+
 [[tool.uv.index]]
-url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
+name = "pypi"
+url = "https://pypi.org/simple"
 default = true

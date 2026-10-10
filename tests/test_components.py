@@ -150,6 +150,7 @@ def rope_output_shape_matches_query():
         assert out_k.shape == q.shape, f"{label}: got {tuple(out_k.shape)}"
         assert torch.isfinite(out_q).all(), label
 
+
 def rope_half_split_layout():
     """rotate_half 约定：前半与后半共用同一组频率。"""
     cos, sin = precompute_freqs(dim=HEAD_DIM, end=4, rope_base=1e6)
@@ -178,9 +179,7 @@ def yarn_ramp_is_monotonic():
 
 def yarn_is_noop_within_original_window():
     plain, _ = precompute_freqs(dim=HEAD_DIM, end=2048, rope_base=1e6)
-    scaled, _ = precompute_freqs(
-        dim=HEAD_DIM, end=2048, rope_base=1e6, rope_scaling=YARN
-    )
+    scaled, _ = precompute_freqs(dim=HEAD_DIM, end=2048, rope_base=1e6, rope_scaling=YARN)
     assert torch.allclose(plain, scaled, atol=1e-6)
 
 
@@ -188,13 +187,10 @@ def yarn_attention_factor_compensates():
     """attention_factor 对 cos/sin 做均匀缩放，用于补偿长上下文下注意力分布的发散。"""
     cos1, sin1 = precompute_freqs(dim=HEAD_DIM, end=4096, rope_base=1e6, rope_scaling=YARN)
     boosted = dict(YARN, attention_factor=2.0)
-    cos2, sin2 = precompute_freqs(
-        dim=HEAD_DIM, end=4096, rope_base=1e6, rope_scaling=boosted
-    )
+    cos2, sin2 = precompute_freqs(dim=HEAD_DIM, end=4096, rope_base=1e6, rope_scaling=boosted)
     assert torch.allclose(cos2, cos1 * 2, atol=1e-6)
     assert torch.allclose(sin2, sin1 * 2, atol=1e-6)
     assert cos1.abs().max() <= 1.0 + 1e-6 and cos2.abs().max() <= 2.0 + 1e-6
-
 
 
 # ---------------------------------------------------------------- Config
@@ -222,7 +218,9 @@ def config_default_geometry():
 
 if __name__ == "__main__":
     torch.manual_seed(0)
-    tests = [v for k, v in sorted(globals().items()) if k.startswith(("rms_norm_", "rope_", "yarn_", "config_"))]
+    tests = [
+        v for k, v in sorted(globals().items()) if k.startswith(("rms_norm_", "rope_", "yarn_", "config_"))
+    ]
     failures = []
     for fn in tests:
         try:

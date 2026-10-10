@@ -1,27 +1,31 @@
-# Python
+# Python, build and tooling caches
 __pycache__/
 *.py[cod]
 *.egg-info/
 .venv/
 venv/
-
-# Tooling caches
+.cache/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
 .ipynb_checkpoints/
+build/
+dist/
 
-# Model artifacts & data
+# Downloaded resources and generated checkpoints
+assets/
+data/
+output/
+outputs/
+checkpoints/
+datasets/
+runs/
 *.safetensors
 *.bin
 *.ckpt
 *.pth
 *.pkl
-runs/
-output/
-outputs/
-checkpoints/
-datasets/
+*.part
 
 # Editors / OS
 .idea/

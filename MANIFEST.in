@@ -1,0 +1,10 @@
+include README.md LICENSE uv.lock
+recursive-include docs *.md *.png
+recursive-include examples *.jsonl
+recursive-include tests *.py
+prune .cache
+prune .venv
+prune assets
+prune data
+prune output
+global-exclude __pycache__ *.py[cod] *.pth
